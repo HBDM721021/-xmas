@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>3D 旋转圣诞树</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    height: 100%; width: 100%;
+    background: #000;
+    overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: none;
+  }
+  canvas {
+    display: block;
+    width: 100vw; height: 100vh;
+    background: #000;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<script>
+(function () {
+  "use strict";
+
+  /* =========================================================
+     可配置项：改这里就行
+     ========================================================= */
+  const LABEL = "刘奕嘉";            // 署名文字
+  const TITLE = "Merry Christmas";  // 主标题
+
+  /* =========================================================
+     场景参数（与原仓库 tree.py 完全一致）
+     ========================================================= */
+  const CAM_DIST   = 16.0;   // 相机离原点的前后距离
+  const CAM_HEIGHT = 6.0;    // 相机高度
+  const PITCH      = -0.10;  // 负角度 = 俯视
+  const TREE_HEIGHT = 12.0;  // 树高度
+  const TAU = Math.PI * 2;
+
+  // 归一化高斯笔刷（每个粒子总能量守恒，笔刷变大也不会整体变暗/变亮）
+  const TOT1 = 0.55 + 1.0 + 0.55;
+  const TOT2 = 0.18 + 0.55 + 1.0 + 0.55 + 0.18;
+  const WGT1 = [0, 1.0, 0];   // 单像素硬点，颗粒边界最清晰
+  const WGT2 = [0.18 / TOT2, 0.55 / TOT2, 1.0 / TOT2, 0.55 / TOT2, 0.18 / TOT2];
+  const PIX_GAIN = 0.9;   // 单颗粒子能量，越大越亮、越容易糊成白色
+  const BRUSH = 0.55;       // 笔刷半径系数
+
+  const COS_P = Math.cos(PITCH);
+  const SIN_P = Math.sin(PITCH);
+
+  const canvas = document.getElementById("stage");
+  const ctx = canvas.getContext("2d", { alpha: false });
+
+  /* =========================================================
+     工具函数（对应 python 的 random.uniform / randint / gauss）
+     ========================================================= */
+  const rnd = Math.random;
+  const uni = (a, b) => a + rnd() * (b - a);
+  const rint = (a, b) => a + Math.floor(rnd() * (b - a + 1));
+  function gauss(mu, sigma) {
+    let u = 0, v = 0;
+    while (u === 0) u = rnd();
+    while (v === 0) v = rnd();
+    return mu + sigma * Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v);
+  }
+
+  /* =========================================================
+     粒子数据（扁平数组，方便逐帧计算）
+     ========================================================= */
+  const px = [], py = [], pz = [], pr = [], pg = [], pb = [], pt = [];
+  let CUR_TYPE = 0;   // 0=树/爱心  1=星空  2=地面
+  const add = (x, y, z, r, g, b) => {
+    px.push(x); py.push(y); pz.push(z);
+    pr.push(r); pg.push(g); pb.push(b);
+    pt.push(CUR_TYPE);
+  };
+
+  /* ---------- 圣诞树：70% 螺旋灯带 + 30% 蓬松填充 ---------- */
+  function genTree(n) {
+    const loops = 9;
+    const spiralN = Math.floor(n * 0.52);  // 螺旋灯带占 52%，其余是树周围的蓬松粒子
+
+    for (let i = 0; i < spiralN; i++) {
+      const u = rnd();
+      const h = Math.pow(u, 1.6);                 // 底部密、顶部稀
+      const y = TREE_HEIGHT * h + 0.2;
+
+      let baseR = Math.pow(1 - h, 1.1) * 3.2;
+      const branchWave = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+      baseR *= 1.0 + 0.65 * branchWave;
+
+      const t = u * loops * TAU;
+      const angle = t + uni(-0.22, 0.22);
+      const r = baseR * uni(0.85, 1.08);
+
+      const x = Math.cos(angle) * r;
+      const z = Math.sin(angle) * r;
+
+      let midBoost = 1.0 - Math.abs(h - 0.55) * 1.5;
+      midBoost = Math.max(0.15, midBoost);
+      // 浅粉：红拉满、绿蓝压低，淡淡的樱花粉
+      let rr = 242 + Math.floor(13 * midBoost);
+      let gg = 88 + Math.floor(50 * midBoost);
+      let bb = 138 + Math.floor(48 * midBoost);
+      rr = Math.min(255, Math.max(220, rr + rint(-8, 10)));
+      gg = Math.min(170, Math.max(70, gg + rint(-12, 15)));
+      bb = Math.min(210, Math.max(118, bb + rint(-12, 15)));
+
+      // 越靠上越收光，避免顶部几圈白得发爆
+      const dim = 1.0 - 0.62 * Math.pow(Math.max(0, (h - 0.45) / 0.55), 1.2);
+
+      if (rnd() < 0.08) {
+        // 更亮的小彩灯
+        // 暖黄小灯，对应图里的金色亮点
+        add(x, y, z, 255 * dim, rint(210, 245) * dim, rint(110, 165) * dim);
+      } else {
+        add(x, y, z, rr * dim, gg * dim, bb * dim);
+      }
+    }
+
+    const fillN = n - spiralN;
+    for (let i = 0; i < fillN; i++) {
+      const h = Math.pow(rnd(), 1.9);
+      const y = TREE_HEIGHT * h + 0.2 + uni(-0.08, 0.08);
+
+      let baseR = Math.pow(1 - h, 1.1) * 4.3;
+      const branchWave = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+      baseR *= 1.0 + 0.65 * branchWave;
+
+      const r = baseR * Math.sqrt(rnd());
+      const angle = rnd() * TAU;
+
+      const x = Math.cos(angle) * r + uni(-0.08, 0.08);
+      const z = Math.sin(angle) * r + uni(-0.08, 0.08);
+
+      add(x, y, z, rint(235, 252) * 0.8, rint(120, 175) * 0.8, rint(165, 215) * 0.8);
+    }
+  }
+
+  /* ---------- 树身周围的绒毛粒子：让树的轮廓更蓬松、更密 ---------- */
+  function genTreeAura(n) {
+    for (let i = 0; i < n; i++) {
+      const h = Math.pow(rnd(), 1.7);
+      const y = TREE_HEIGHT * h + 0.2 + uni(-0.12, 0.12);
+
+      let baseR = Math.pow(1 - h, 1.1) * 4.0;
+      const branchWave = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+      baseR *= 1.0 + 0.65 * branchWave;
+
+      const r = baseR * uni(0.85, 1.35);     // 撒在树身外侧一圈
+      const angle = rnd() * TAU;
+
+      const x = Math.cos(angle) * r;
+      const z = Math.sin(angle) * r;
+
+      // 稍微压暗，作为树周的"雾气"，不抢树本身的亮
+      add(x, y, z, 255, rint(150, 210), rint(175, 235));
+    }
+  }
+
+  /* ---------- 地面光环（法阵盘子） ---------- */
+  function genGround(n) {
+    const rings = [4.6, 6.0, 7.4, 8.8, 10.2, 11.4];
+    for (let i = 0; i < n; i++) {
+      const ring = rings[Math.floor(rnd() * rings.length)];
+      const r = gauss(ring, 0.3);
+      const theta = rnd() * TAU;
+      const x = Math.cos(theta) * r;
+      const z = Math.sin(theta) * r;
+      const y = -0.25;
+      const c = (rnd() < 0.15) ? rint(200, 228) : rint(150, 185);
+      add(x, y, z, c, Math.floor(c * 0.9), Math.floor(c * 0.72));
+    }
+  }
+
+  /* ---------- 空中 3D 小亮点（随场景一起旋转） ---------- */
+  function genStars(n) {
+    for (let i = 0; i < n; i++) {
+      const x = uni(-18, 18);
+      const z = uni(-18, 18);
+      const y = uni(3, 18);
+      const base = rint(215, 255);
+      add(x, y, z, base, Math.floor(base * 0.96), Math.floor(base * 0.88));
+    }
+  }
+
+  /* ---------- 树顶 3D 爱心：(x²+y²-1)³ - x²y³ <= 0 采样 ---------- */
+  function genHeart(n) {
+    const scale = 0.9;
+    const topY = TREE_HEIGHT + 0.05;
+
+    let made = 0, tries = 0;
+    while (made < n && tries < n * 60) {
+      tries++;
+      const x = uni(-1.3, 1.3);
+      const y = uni(-1.4, 1.4);
+      const f = Math.pow(x * x + y * y - 1.0, 3) - x * x * Math.pow(y, 3);
+      if (f > 0) continue;
+
+      const wx = x * scale * 0.8;
+      const wy = topY + (y + 1.0) * scale * 0.5;
+      const wz = uni(-0.18, 0.18);
+
+      const dist = Math.sqrt(x * x + y * y);
+      const factor = Math.max(0.35, 1.15 - 0.5 * dist);
+      // 从上到下的渐变：顶部淡粉，越往下越偏冷白，自然过渡到青色的树尖
+      const t = Math.max(0, Math.min(1, (wy - topY) / 0.62));   // 大部分区域为粉，只在最底部往冷白过渡
+      let r = Math.floor((220 + 35 * t) * (0.9 + 0.1 * factor));
+      let g = Math.floor((240 - 55 * t) * (0.9 + 0.1 * factor));
+      let b = Math.floor((255 - 45 * t) * (0.9 + 0.1 * factor));
+
+      add(wx, wy, wz, r, g, b);
+      made++;
+    }
+  }
+
+  /* =========================================================
+     生成粒子（按设备规模自适应数量）
+     ========================================================= */
+  const CSS_MIN = Math.min(window.innerWidth, window.innerHeight);
+  const IS_SMALL = CSS_MIN < 620;
+
+  const COUNT = {
+    tree:   IS_SMALL ? 19000 : 26000,
+    ground: IS_SMALL ? 800   : 1200,
+    stars:  IS_SMALL ? 520   : 800,
+    heart:  IS_SMALL ? 600   : 900,
+    aura:   IS_SMALL ? 9000  : 16000
+  };
+
+  CUR_TYPE = 2;  genGround(COUNT.ground);
+  CUR_TYPE = 1;  genStars(COUNT.stars);
+  CUR_TYPE = 0;
+  genTree(COUNT.tree);
+  genTreeAura(COUNT.aura);
+  genHeart(COUNT.heart);
+
+  const N = px.length;
+  const PX = new Float32Array(px);
+  const PY = new Float32Array(py);
+  const PZ = new Float32Array(pz);
+  const PR = new Uint8Array(pr);
+  const PG = new Uint8Array(pg);
+  const PB = new Uint8Array(pb);
+  const TY = new Uint8Array(pt);
+
+  /* =========================================================
+     画布 & 低分辨率发光缓冲
+     ========================================================= */
+  let W = 1, H = 1, CX = 0, CY = 0, F0 = 1, SIZE_K = 1, SNOW_K = 1, DOT = 1;
+  let buf, bufCtx, imgData, bufPx, bufU32, BW = 1, BH = 1, B_SCALE = 0.62;
+
+  const snowflakes = [];
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const cssW = canvas.clientWidth || window.innerWidth;
+    const cssH = canvas.clientHeight || window.innerHeight;
+
+    W = Math.max(1, Math.round(cssW * dpr));
+    H = Math.max(1, Math.round(cssH * dpr));
+    canvas.width = W;
+    canvas.height = H;
+
+    // 焦距：按"树的宽度/高度"反算，竖屏横屏都能把树框得舒服
+    const f = Math.min((W * 0.95) / 10.6, (H * 0.62) / 10.2);
+    F0 = f * CAM_DIST;
+    SIZE_K = f / 43.6;                 // 43.6 ≈ 原仓库 900*0.63/13
+    SNOW_K = Math.min(W, H) / 750;
+    DOT = (W / Math.max(1, canvas.clientWidth)) >= 1.5 ? 2 : 1;
+    CX = W / 2;
+    CY = H * 0.82 - 4.57 * f;          // 让树底盘落在画面 82% 高度附近
+
+    // 发光缓冲：低分辨率 + 平滑放大 = 天然辉光，性能也稳
+    B_SCALE = 1.0;
+    BW = Math.max(1, Math.round(W * B_SCALE));
+    BH = Math.max(1, Math.round(H * B_SCALE));
+
+    if (!buf) buf = document.createElement("canvas");
+    buf.width = BW;
+    buf.height = BH;
+    bufCtx = buf.getContext("2d", { alpha: false });
+    imgData = bufCtx.createImageData(BW, BH);
+    bufPx = imgData.data;
+    bufU32 = new Uint32Array(imgData.data.buffer);
+
+    // 前景大雪花（屏幕空间）
+    snowflakes.length = 0;
+    const snowCount = 10;
+    for (let i = 0; i < snowCount; i++) {
+      snowflakes.push({
+        x: uni(0, W),
+        y: uni(-H * 0.09, -H * 0.01),
+        r: uni(11, 17) * SNOW_K,
+        v: uni(30, 45) * SNOW_K,
+        life: 1, maxLife: 1
+      });
+      respawn(snowflakes[snowflakes.length - 1], true);
+    }
+  }
+
+  function respawn(f, initial) {
+    f.x = uni(0, W);
+    f.y = initial ? uni(-H * 0.09, -H * 0.01) : uni(-H * 0.09, -H * 0.01);
+    f.r = uni(11, 17) * SNOW_K;
+    f.v = uni(30, 45) * SNOW_K;
+    const travel = H + H * 0.09 - f.y;
+    f.maxLife = Math.max(0.001, travel / f.v);
+    f.life = initial ? uni(0.05, f.maxLife) : f.maxLife;
+  }
+
+  /* =========================================================
+     主循环
+     ========================================================= */
+  let angle = 0;
+  let last = 0;
+  let running = true;
+  let DEGRADED = false;     // 低端机自动降级
+  let revealT = 0;          // 生长动画进度（秒）
+  const REVEAL_DUR = 7.0;   // 从底部升到顶部的时间，越大越慢
+  let perfSum = 0, perfN = 0;
+
+  function frame(ts) {
+    if (!running) return;
+    if (!last) last = ts;
+    let dt = (ts - last) / 1000;
+    last = ts;
+    if (dt > 0.1) dt = 0.1;      // 切后台回来不要跳帧
+
+    /* ---- 生长：一条从下往上缓慢升起的显现边界 ---- */
+    if (revealT < REVEAL_DUR) revealT = Math.min(REVEAL_DUR, revealT + dt);
+    const rp = Math.min(1, revealT / REVEAL_DUR);
+    const revealY = -0.6 + 14.4 * (1 - Math.pow(1 - rp, 2.2));
+    const skyFade = Math.min(1, revealT / 1.6);   // 星空/地面开场淡入
+
+    /* ---- 1. 清空发光缓冲（同时把 alpha 置为不透明） ---- */
+    bufU32.fill(0xFF000000);
+
+    /* ---- 2. 3D 投影 + 加色绘制 ---- */
+    const tStart = performance.now();
+    const ca = Math.cos(angle);
+    const sa = Math.sin(angle);
+    const bx = BW / W;
+    const by = BH / H;
+    const w = BW, hh = BH;
+
+    for (let i = 0; i < N; i++) {
+      const x = PX[i], y = PY[i], z = PZ[i];
+
+      let vis;
+      if (TY[i] === 0) {
+        if (y > revealY) continue;                             // 树还没长到这里
+        vis = Math.min(1, (revealY - y) * 1.2);                // 边界处柔和淡入
+      } else {
+        vis = skyFade;                                         // 星空与地面开场淡入
+      }
+      if (vis <= 0.002) continue;
+
+      const xz = x * ca - z * sa;
+      const zz = x * sa + z * ca;
+
+      const yp = y * COS_P - zz * SIN_P;
+      const zp = y * SIN_P + zz * COS_P + CAM_DIST;
+      if (zp <= 0.1) continue;
+
+      const f = F0 / zp;
+      const sx = CX + xz * f;
+      const sy = CY - (yp - CAM_HEIGHT) * f;
+      if (sx < -3 || sx > W + 3 || sy < -3 || sy > H + 3) continue;
+
+      const BXp = (sx * bx) | 0;
+      const BYp = (sy * by) | 0;
+      const R = 1;   // 统一单像素硬点，各分辨率都一样清晰
+      if (BXp < -R || BYp < -R || BXp > w + R || BYp > hh + R) continue;
+
+      // 单颗粒子的能量（压低，密集处才不会糊成纯白，颜色能留住）
+      const vg = PIX_GAIN * vis;
+      const r = PR[i] * vg, g = PG[i] * vg, b = PB[i] * vg;
+
+      // 实心方点：边缘锐利，且在不同屏幕密度下都保持"一个 CSS 像素"的大小
+      for (let dy = 0; dy < DOT; dy++) {
+        const yy = BYp + dy;
+        if (yy < 0 || yy >= hh) continue;
+        const rowBase = (yy * w) << 2;
+        for (let dx = 0; dx < DOT; dx++) {
+          const xx = BXp + dx;
+          if (xx < 0 || xx >= w) continue;
+          const j = rowBase + (xx << 2);
+          bufPx[j] = bufPx[j] + r;
+          bufPx[j + 1] = bufPx[j + 1] + g;
+          bufPx[j + 2] = bufPx[j + 2] + b;
+        }
+      }
+    }
+
+    const cost = performance.now() - tStart;
+    if (!DEGRADED) {
+      perfSum += cost; perfN++;
+      if (perfN >= 45) {
+        if (perfSum / perfN > 15) DEGRADED = true;   // 算力吃紧就自动降一档
+        perfSum = 0; perfN = 0;
+      }
+    }
+
+    bufCtx.putImageData(imgData, 0, 0);
+
+    /* ---- 3. 合成到主画布（加色 + 平滑放大 = 辉光） ---- */
+    ctx.globalCompositeOperation = "source-over";
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, W, H);
+
+
+    ctx.globalCompositeOperation = "lighter";
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+
+    ctx.globalAlpha = 1.0;
+    ctx.drawImage(buf, 0, 0, W, H);
+
+    // 一层很淡的辉光：把缓冲放大 4% 再叠一次，既保留锐度又有光晕
+    if (!DEGRADED) {
+      ctx.globalAlpha = 0.18;   // 低像素密度屏补一点光晕
+      const ox = W * 0.02, oy = H * 0.02;
+      ctx.drawImage(buf, -ox, -oy, W + ox * 2, H + oy * 2);
+    }
+
+    ctx.globalAlpha = 1.0;
+    ctx.globalCompositeOperation = "source-over";
+
+    /* ---- 4. 前景大雪花 ---- */
+    for (const f of snowflakes) {
+      f.y += f.v * dt;
+      f.life -= dt;
+      if (f.life <= 0 || f.y > H + H * 0.05) respawn(f, false);
+
+      const phase = f.life / f.maxLife;
+      let alpha = phase > 0.3 ? 1 : Math.max(0, phase / 0.3);
+      if (alpha <= 0) continue;
+
+      // 顶部再淡入一点，避免从屏幕边缘"硬冒出来"
+      const fadeIn = Math.min(1, Math.max(0, (f.y + H * 0.05) / (H * 0.12)));
+      alpha *= fadeIn;
+
+      const cx = f.x, cy = f.y;
+      const R = Math.max(3, f.r * 1.6);
+
+      // 柔和的径向光斑，比实心圆更像雪花
+      const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
+      grad.addColorStop(0.0, "rgba(255,255,255," + (0.78 * alpha).toFixed(3) + ")");
+      grad.addColorStop(0.28, "rgba(242,248,255," + (0.40 * alpha).toFixed(3) + ")");
+      grad.addColorStop(0.62, "rgba(214,232,255," + (0.18 * alpha).toFixed(3) + ")");
+      grad.addColorStop(1.0, "rgba(200,225,255,0)");
+      ctx.fillStyle = grad;
+      dot(cx, cy, R);
+    }
+
+    /* ---- 5. 文字 ---- */
+    const big = Math.max(14, Math.min(90, W * 0.042));
+    ctx.save();
+    ctx.shadowColor = "rgba(180,220,255,0.85)";
+    ctx.shadowBlur = big * 0.55;
+    ctx.fillStyle = "rgba(255,255,255,0.95)";
+    ctx.textBaseline = "middle";
+    ctx.font = "italic " + big.toFixed(1) + 'px "Monotype Corsiva","Snell Roundhand","Brush Script MT",Georgia,serif';
+    ctx.fillText(TITLE, W * 0.055, H * 0.28);
+    if (LABEL) {
+      const small = big * 0.80;
+      ctx.font = "italic " + small.toFixed(1) + 'px "Monotype Corsiva","Snell Roundhand","Brush Script MT",Georgia,serif';
+      ctx.fillStyle = "rgba(255,255,255,0.92)";
+      ctx.fillText(LABEL, W * 0.055, H * 0.28 + big * 1.05);
+    }
+    ctx.restore();
+
+    /* ---- 6. 旋转 ---- */
+    angle += 0.27 * dt;
+    if (angle > TAU) angle -= TAU;
+
+    requestAnimationFrame(frame);
+  }
+
+  function dot(cx, cy, r) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, TAU);
+    ctx.fill();
+  }
+
+  /* =========================================================
+     启动 / 自适应
+     ========================================================= */
+  let resizeTimer = null;
+  window.addEventListener("resize", function () {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function () {
+      resize();
+      // 雪花尺寸跟随新分辨率
+      for (const f of snowflakes) respawn(f, true);
+    }, 150);
+  });
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      running = false;
+    } else if (!running) {
+      running = true;
+      last = 0;
+      requestAnimationFrame(frame);
+    }
+  });
+
+  // 轻点屏幕可重播一次生长动画
+  canvas.addEventListener("pointerdown", function () { revealT = 0; });
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
